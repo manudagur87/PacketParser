@@ -55,43 +55,58 @@ typedef enum logic [1:0] {
 
 state_t state;
 state_t next_state;
+logic s_axis_tlast_d1;
 
 logic drop_ether;
-logic [16:0] ethertype;
+logic [15:0] ethertype;
 
 logic [6:0] byte_cnt;
 always_ff @(posedge clk) begin
     if(!rst_n)
         byte_cnt <= 7'd0;
     else if(s_axis_tvalid && s_axis_tready)
-        byte_cnt <= byte_cnt + 7'd1;
+        byte_cnt <= s_axis_tlast ? 7'd0 : byte_cnt + 7'd1;
 end
 
 always_ff @(posedge clk) begin
     if(!rst_n)
         state <= S_HEADER;
-    else
+    else if (s_axis_tvalid && s_axis_tready)
         state <= next_state;
+end
+
+always_ff @(posedge clk) begin
+    if(!rst_n)
+        s_axis_tlast_d1 <= 1'b0;
+    else
+        s_axis_tlast_d1 <= s_axis_tlast;
 end
 
 always_comb begin
     next_state = state;
     case (state)
         S_HEADER: next_state = drop_ether ? S_DROP : (byte_cnt >= 14) ? S_PAYLOAD : S_HEADER;
-        S_PAYLOAD: next_state = s_axis_tlast ? S_HEADER : S_PAYLOAD;
+        S_PAYLOAD: next_state = s_axis_tlast_d1 ? S_HEADER : S_PAYLOAD;
         S_DROP: next_state = s_axis_tlast ? S_HEADER : S_DROP;
     endcase
 end
 
 always_ff @(posedge clk) begin
-    if(byte_cnt <= 5) begin
+    if(byte_cnt <= 5 && s_axis_tvalid && s_axis_tready)
         dst_mac[{3'd5 - byte_cnt[2:0], 3'b111} -: 8] <= s_axis_tdata;
-        //something should come here
-     end
-    else if(byte_cnt <= 11)
+        m_axis_tvalid <= 0;
+        m_axis_tlast <= 0;
+        s_axis_tready <= 1'b1;
+    else if(byte_cnt <= 11 && s_axis_tvalid && s_axis_tready)
         src_mac[{4'd11 - byte_cnt[3:0], 3'b111} -: 8] <= s_axis_tdata;
-    else if(byte_cnt <= 13)
+        m_axis_tvalid <= 0;
+        m_axis_tlast <= 0;
+        s_axis_tready <= 1'b1;
+    else if(byte_cnt <= 13 && s_axis_tvalid && s_axis_tready)
         ethertype[{4'd13 - byte_cnt[3:0], 3'b111} -: 8] <= s_axis_tdata;
+        m_axis_tvalid <= 0;
+        m_axis_tlast <= 0;
+        s_axis_tready <= 1'b1;
     else if(next_state == S_PAYLOAD) begin
         m_axis_tdata <= s_axis_tdata;
         m_axis_tvalid <= s_axis_tvalid;
@@ -102,13 +117,15 @@ always_ff @(posedge clk) begin
         m_axis_tdata <= 0;
         m_axis_tvalid <= 0;
         m_axis_tlast <= 0;
-        s_axis_tready <= 1;
+        s_axis_tready <= 1'b1;
     end
 end
 
 assign frame_in = (byte_cnt == 0) && s_axis_tvalid && s_axis_tready;
 assign drop_frame = (state == S_HEADER) && s_axis_tvalid && s_axis_tready && drop_ether;
-assign drop_ether = /*(byte_cnt == 14) && */((ethertype != 16'h0800) || ((dst_mac != cfg_mac) && (dst_mac != 48'hFFFFFFFFFFFF))); 
+assign drop_ether = (byte_cnt == 14) && ((ethertype != 16'h0800) || ((dst_mac != cfg_mac) && (dst_mac != 48'hFFFFFFFFFFFF))); 
+
+//Could add a skid buffer here to avoid dropping the first byte of the payload when m_axis_tready is low.
 
 endmodule
 
